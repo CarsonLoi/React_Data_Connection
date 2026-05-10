@@ -1,4 +1,318 @@
-if (facet.chartData.length > 30) {
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import * as echarts from 'echarts';
+import { Box, Typography, Select, MenuItem, FormControl, Stack, ToggleButton, ToggleButtonGroup, Button } from '@mui/material';
+import dayjs from 'dayjs';
+import { GAMETYPE_COLORS, MANUFACTURER_COLORS, LINK_COLORS } from '../../constants/heatmapConstants';
+
+const COLOR_PALETTE = [
+    '#7aa2f7', '#bb9af7', '#7dcfff', '#e0af68', '#9ece6a',
+    '#f7768e', '#00b4d8', '#ff9e64', '#b4f9f8', '#2ac3de',
+    '#c0caf5', '#565f89', '#9aa5ce', '#cfc9c2', '#ff9e64'
+];
+
+const TrendCharts = ({ data, isHourly, scatterData, selectedLocations = [], onRankingSelection }) => {
+    const [view, setView] = useState('trend'); // 'trend' or 'ranking'
+    const [rankingKPI, setRankingKPI] = useState('theo');
+    const [rankingGroup, setRankingGroup] = useState('area');
+    const [rankingFacet, setRankingFacet] = useState('none');
+    const [rankingColorBy, setRankingColorBy] = useState('area');
+    const [rankingOrder, setRankingOrder] = useState('desc'); // 'desc' or 'asc'
+    const [trendMetrics, setTrendMetrics] = useState(['turnover', 'theo', 'coreUtilization']);
+
+    const containerRef = useRef(null);
+    const chartsRef = useRef([]);
+
+    const clearAllBrushes = () => {
+        chartsRef.current.forEach(chart => {
+            if (chart) {
+                chart.dispatchAction({
+                    type: 'brush',
+                    command: 'clear',
+                    areas: []
+                });
+            }
+        });
+        onRankingSelection?.([]);
+    };
+
+    const KPI_OPTIONS = [
+        { key: 'turnover', label: 'Turnover per Unit per Day' },
+        { key: 'win', label: 'Daily Win per Unit per Day' },
+        { key: 'theo', label: 'Theo per Unit per Day' },
+        { key: 'rated_theo', label: 'Rated Theo per Unit per Day' },
+        { key: 'utilization', label: 'Utilization', isPercent: true },
+        { key: 'coreUtilization', label: 'Core Utilization', isPercent: true },
+        { key: 'avgBet', label: 'Average Bet' },
+        { key: 'pulls', label: 'Pulls per Unit per Day' }
+    ];
+
+    const DIMENSION_OPTIONS = [
+        { key: 'location', label: 'Unit' },
+        { key: 'area', label: 'Area' },
+        { key: 'manufacturer', label: 'Manufacturer' },
+        { key: 'game', label: 'Game Type' },
+        { key: 'denomination', label: 'Denom' },
+        { key: 'link', label: 'Link' }
+    ];
+
+    // Aggregation Logic for Ranking
+    const rankingData = useMemo(() => {
+        if (view !== 'ranking' || !scatterData || scatterData.length === 0) return [];
+
+        const facetField = rankingFacet === 'none' ? null : rankingFacet;
+        const groupField = rankingGroup;
+        const colorField = rankingColorBy;
+
+        const facets = {};
+
+        scatterData.forEach(d => {
+            const fKey = facetField ? (d[facetField] || 'Unknown') : 'All';
+            const gKey = groupField === 'location' ? `${d.location}_${d.asset}` : (d[groupField] || 'Unknown');
+
+            if (!facets[fKey]) facets[fKey] = {};
+            if (!facets[fKey][gKey]) {
+                facets[fKey][gKey] = {
+                    raw_turnover: 0, raw_win: 0, raw_theo: 0, raw_rated_theo: 0, raw_played_mins: 0,
+                    raw_floor_mins: 0, raw_core_played_mins: 0, raw_core_floor_mins: 0,
+                    raw_mday: 0, raw_games: 0, count: 0,
+                    colorGroup: d[colorField] || 'Unknown'
+                };
+            }
+
+            const g = facets[fKey][gKey];
+            g.raw_turnover += d.raw_turnover || 0;
+            g.raw_win += d.raw_win || 0;
+            g.raw_theo += d.raw_theo || 0;
+            g.raw_rated_theo += d.raw_rated_theo || 0;
+            g.raw_played_mins += d.raw_played_mins || 0;
+            g.raw_floor_mins += d.raw_floor_mins || 0;
+            g.raw_core_played_mins += d.raw_core_played_mins || 0;
+            g.raw_core_floor_mins += d.raw_core_floor_mins || 0;
+            g.raw_mday += d.raw_mday || 0;
+            g.raw_games += d.raw_games || 0;
+            g.count += 1;
+        });
+
+        const result = Object.entries(facets).map(([facetLabel, groups]) => {
+            const chartData = Object.entries(groups).map(([groupLabel, stats]) => {
+                let value = 0;
+                switch (rankingKPI) {
+                    case 'turnover': value = stats.raw_mday > 0 ? stats.raw_turnover / stats.raw_mday : 0; break;
+                    case 'win': value = stats.raw_mday > 0 ? stats.raw_win / stats.raw_mday : 0; break;
+                    case 'theo': value = stats.raw_mday > 0 ? stats.raw_theo / stats.raw_mday : 0; break;
+                    case 'rated_theo': value = stats.raw_mday > 0 ? stats.raw_rated_theo / stats.raw_mday : 0; break;
+                    case 'utilization': value = stats.raw_floor_mins > 0 ? stats.raw_played_mins / stats.raw_floor_mins : 0; break;
+                    case 'coreUtilization': value = stats.raw_core_floor_mins > 0 ? stats.raw_core_played_mins / stats.raw_core_floor_mins : 0; break;
+                    case 'avgBet': value = stats.raw_games > 0 ? stats.raw_turnover / stats.raw_games : 0; break;
+                    case 'pulls': value = stats.raw_mday > 0 ? stats.raw_games / stats.raw_mday : 0; break;
+                    default: value = 0;
+                }
+                return { label: groupLabel, value, colorGroup: stats.colorGroup };
+            }).sort((a, b) => rankingOrder === 'desc' ? b.value - a.value : a.value - b.value);
+
+            return { facetLabel, chartData };
+        });
+
+        return result;
+
+    }, [view, rankingKPI, rankingGroup, rankingFacet, rankingColorBy, rankingOrder, scatterData]);
+
+    useEffect(() => {
+        if (!containerRef.current) return;
+
+        // Dispose old charts
+        chartsRef.current.forEach(c => c && c.dispose());
+        chartsRef.current = [];
+
+        if (view === 'trend') {
+            if (!data || data.length === 0) return;
+            const metrics = trendMetrics.map(key => {
+                const opt = KPI_OPTIONS.find(o => o.key === key);
+                return {
+                    key,
+                    label: (key === 'turnover' ? 'Daily Turnover' : key === 'theo' ? 'Daily Theo' : opt.label),
+                    color: key === 'turnover' ? '#7aa2f7' : key === 'theo' ? '#bb9af7' : '#0AFA6C',
+                    isPercent: opt.isPercent
+                };
+            });
+
+            metrics.forEach((metric, idx) => {
+                const chartDom = containerRef.current.querySelector(`.chart-trend-${idx}`);
+                if (!chartDom) return;
+                const chart = echarts.init(chartDom);
+                chartsRef.current[idx] = chart;
+
+                chart.setOption({
+                    animation: false,
+                    backgroundColor: 'transparent',
+                    grid: { top: 30, bottom: 25, left: 50, right: 20 },
+                    tooltip: {
+                        trigger: 'axis',
+                        backgroundColor: 'rgba(30,30,48,0.9)',
+                        formatter: (params) => {
+                            const p = params[0];
+                            let val = p.value;
+                            if (metric.isPercent) val = (val * 100).toFixed(1) + '%';
+                            else val = Math.round(val).toLocaleString();
+                            const dateLabel = isHourly ? p.name : dayjs(p.name).format('MMM DD');
+                            return `<div style="font-size:14px; padding: 4px;">${dateLabel}<br/><b style="color:${metric.color}">${metric.label}: ${val}</b></div>`;
+                        }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: data.map(d => d.label),
+                        axisLabel: {
+                            color: 'rgba(255,255,255,0.6)',
+                            fontSize: 12,
+                            interval: isHourly ? 3 : 'auto',
+                            formatter: (val) => isHourly ? val : dayjs(val).format('MMM DD')
+                        }
+                    },
+                    yAxis: {
+                        type: 'value',
+                        axisLabel: {
+                            color: 'rgba(255,255,255,0.6)', fontSize: 12,
+                            formatter: (val) => {
+                                const absVal = Math.abs(val);
+                                const sign = val < 0 ? '-' : '';
+                                if (metric.isPercent) return (val * 100).toFixed(0) + '%';
+                                if (absVal >= 1000000) return sign + (absVal / 1000000).toFixed(0) + 'M';
+                                if (absVal >= 1000) return sign + (absVal / 1000).toFixed(0) + 'K';
+                                return val;
+                            }
+                        },
+                        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } }
+                    },
+                    series: [{
+                        type: 'line',
+                        data: data.map(d => d[metric.key]),
+                        smooth: true,
+                        lineStyle: { width: 2, color: metric.color },
+                        areaStyle: {
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                { offset: 0, color: metric.color + '44' },
+                                { offset: 1, color: metric.color + '00' }
+                            ])
+                        }
+                    }]
+                });
+            });
+        } else {
+            // Ranking View
+            // Color Mapping Setup - Align with master legend colors
+            const predefinedColors = 
+                rankingColorBy === 'game' ? GAMETYPE_COLORS : 
+                rankingColorBy === 'manufacturer' ? MANUFACTURER_COLORS : 
+                rankingColorBy === 'link' ? LINK_COLORS : null;
+
+            const allColorGroups = [...new Set(rankingData.flatMap(f => f.chartData.map(d => d.colorGroup)))];
+            const colorMap = {};
+            allColorGroups.forEach((g, i) => {
+                if (predefinedColors && predefinedColors[g]) {
+                    colorMap[g] = predefinedColors[g];
+                } else {
+                    colorMap[g] = COLOR_PALETTE[i % COLOR_PALETTE.length];
+                }
+            });
+
+            rankingData.forEach((facet, idx) => {
+                const chartDom = containerRef.current.querySelector(`.chart-ranking-${idx}`);
+                if (!chartDom) return;
+                const chart = echarts.init(chartDom);
+                chartsRef.current[idx] = chart;
+
+                const kpiInfo = KPI_OPTIONS.find(o => o.key === rankingKPI);
+                const isByUnit = rankingGroup === 'location';
+
+                const option = {
+                    animation: false,
+                    backgroundColor: 'transparent',
+                    grid: { top: 10, bottom: 10, left: 10, right: 40, containLabel: true },
+                    brush: isByUnit ? {
+                        toolbox: ['rect', 'clear'],
+                        xAxisIndex: 0,
+                        throttleType: 'debounce',
+                        throttleDelay: 300,
+                    } : undefined,
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: { type: 'shadow' },
+                        formatter: (params) => {
+                            const p = params[0];
+                            let val = p.value;
+                            if (kpiInfo.isPercent) val = (val * 100).toFixed(1) + '%';
+                            else val = val.toLocaleString(undefined, { maximumFractionDigits: 1 });
+                            const color = p.color.colorStops ? p.color.colorStops[0].color : p.color;
+                            const originalIndex = facet.chartData.length - 1 - p.dataIndex;
+                            return `<div style="font-size:14px; padding: 4px;">${p.name}<br/><b>${kpiInfo.label}: ${val}</b><br/><span style="color:${color}">●</span> ${facet.chartData[originalIndex].colorGroup}</div>`;
+                        }
+                    },
+                    xAxis: {
+                        type: 'value',
+                        axisLabel: {
+                            color: 'rgba(255,255,255,0.6)', fontSize: 12,
+                            formatter: (val) => {
+                                const absVal = Math.abs(val);
+                                const sign = val < 0 ? '-' : '';
+                                if (kpiInfo.isPercent) return (val * 100).toFixed(0) + '%';
+                                if (absVal >= 1000000) return sign + (absVal / 1000000).toFixed(0) + 'M';
+                                if (absVal >= 1000) return sign + (absVal / 1000).toFixed(0) + 'K';
+                                return val;
+                            }
+                        },
+                        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } }
+                    },
+                    yAxis: {
+                        type: 'category',
+                        data: facet.chartData.map(d => d.label).reverse(),
+                        axisLabel: {
+                            color: 'rgba(255,255,255,0.8)',
+                            fontSize: 12,
+                            formatter: (val) => isByUnit && typeof val === 'string' ? val.split('_')[0] : val
+                        }
+                    },
+                    series: [{
+                        type: 'bar',
+                        barMaxWidth: 25,
+                        data: facet.chartData.map((d, i) => {
+                            let color = colorMap[d.colorGroup] || '#7aa2f7';
+
+                            // Highlight selected units, grey out unselected
+                            const isByUnit = rankingGroup === 'location';
+                            if (selectedLocations.length > 0 && isByUnit) {
+                                if (!selectedLocations.includes(d.label)) {
+                                    color = '#404040'; // Grey out unselected
+                                }
+                            }
+
+                            return {
+                                value: d.value,
+                                name: d.label,
+                                itemStyle: {
+                                    color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+                                        { offset: 0, color: color },
+                                        { offset: 1, color: color === '#404040' ? color : color + '33' }
+                                    ])
+                                }
+                            };
+                        }).reverse(),
+                        itemStyle: {
+                            borderRadius: [0, 4, 4, 0]
+                        },
+                        label: {
+                            show: true,
+                            position: 'right',
+                            color: '#fff',
+                            fontSize: 12,
+                            formatter: (params) => {
+                                if (kpiInfo.isPercent) return (params.value * 100).toFixed(1) + '%';
+                                return params.value >= 1000 ? (params.value / 1000).toFixed(1) + 'K' : params.value.toFixed(0);
+                            }
+                        }
+                    }]
+                };
+
+                if (facet.chartData.length > 30) {
                     option.dataZoom = [
                         {
                             type: 'slider',
@@ -22,3 +336,209 @@ if (facet.chartData.length > 30) {
                     ];
                     option.grid.right = 50; // Extra room for the slider
                 }
+
+                chart.setOption(option);
+
+                // Interactivity for Unit Ranking
+                if (isByUnit && onRankingSelection) {
+                    // 1. Single Click (Toggle Selection)
+                    chart.on('click', (params) => {
+                        if (params.componentType === 'series') {
+                            const newSelection = selectedLocations.includes(params.name)
+                                ? selectedLocations.filter(loc => loc !== params.name)
+                                : [...selectedLocations, params.name];
+                            onRankingSelection(newSelection);
+                        }
+                    });
+
+                    // 2. Brush Selection
+                    chart.on('brushSelected', (params) => {
+                        const selectedItems = params.batch[0].selected[0].dataIndex;
+                        if (selectedItems && selectedItems.length > 0) {
+                            const yAxisData = option.yAxis.data;
+                            const selectedLocations = selectedItems.map(idx => yAxisData[idx]);
+                            onRankingSelection(selectedLocations);
+                        } else if (params.batch[0].selected[0].dataIndex.length === 0 && params.brushId) {
+                            // Clear selection - only if it was a brush action
+                            // Actually, maybe don't clear automatically to avoid flickering
+                        }
+                    });
+                }
+            });
+        }
+
+        const handleResize = () => chartsRef.current.forEach(c => c && c.resize());
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, [view, data, isHourly, rankingData, rankingKPI, rankingGroup, rankingColorBy, rankingOrder, selectedLocations, trendMetrics]);
+
+    return (
+        <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 1.5 }}>
+            {/* Header Controls - Row 1: Mode Toggle */}
+            <Box sx={{ display: 'flex', justifyContent: 'flex-start', alignItems: 'center' }}>
+                <ToggleButtonGroup
+                    value={view}
+                    exclusive
+                    onChange={(e, v) => v && setView(v)}
+                    size="small"
+                    sx={{ bgcolor: 'rgba(255,255,255,0.05)' }}
+                >
+                    <ToggleButton value="trend" sx={{ fontSize: '0.65rem', py: 0.5, px: 2 }}>Trend Review</ToggleButton>
+                    <ToggleButton value="ranking" sx={{ fontSize: '0.65rem', py: 0.5, px: 2 }}>Ranking View</ToggleButton>
+                </ToggleButtonGroup>
+            </Box>
+
+            {/* Row 2: Ranking-specific Slicers */}
+            {view === 'ranking' && (
+                <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+                    <FormControl size="small" sx={{ minWidth: 140 }}>
+                        <Select
+                            value={rankingKPI}
+                            onChange={(e) => setRankingKPI(e.target.value)}
+                            sx={{ fontSize: '0.75rem', height: '32px', bgcolor: 'rgba(255,255,255,0.03)' }}
+                        >
+                            {KPI_OPTIONS.map(o => <MenuItem key={o.key} value={o.key} sx={{ fontSize: '0.75rem' }}>{o.label}</MenuItem>)}
+                        </Select>
+                    </FormControl>
+                    <FormControl size="small" sx={{ minWidth: 100 }}>
+                        <Select
+                            value={rankingGroup}
+                            onChange={(e) => setRankingGroup(e.target.value)}
+                            sx={{ fontSize: '0.75rem', height: '32px', bgcolor: 'rgba(255,255,255,0.03)' }}
+                        >
+                            {DIMENSION_OPTIONS.map(o => <MenuItem key={o.key} value={o.key} sx={{ fontSize: '0.75rem' }}>By {o.label}</MenuItem>)}
+                        </Select>
+                    </FormControl>
+
+                    {rankingGroup === 'location' && (
+                        <FormControl size="small" sx={{ minWidth: 110 }}>
+                            <Select
+                                value={rankingColorBy}
+                                onChange={(e) => setRankingColorBy(e.target.value)}
+                                sx={{ fontSize: '0.75rem', height: '32px', color: '#7aa2f7', bgcolor: 'rgba(255,255,255,0.03)' }}
+                            >
+                                {DIMENSION_OPTIONS.filter(o => o.key !== 'location' && o.key !== 'denomination').map(o => (
+                                    <MenuItem key={o.key} value={o.key} sx={{ fontSize: '0.75rem' }}>Color by {o.label}</MenuItem>
+                                ))}
+                            </Select>
+                        </FormControl>
+                    )}
+
+                    <FormControl size="small" sx={{ minWidth: 100 }}>
+                        <Select
+                            value={rankingFacet}
+                            onChange={(e) => setRankingFacet(e.target.value)}
+                            sx={{ fontSize: '0.75rem', height: '32px', bgcolor: 'rgba(255,255,255,0.03)' }}
+                        >
+                            <MenuItem value="none" sx={{ fontSize: '0.75rem' }}>No Grid</MenuItem>
+                            {DIMENSION_OPTIONS.filter(o => o.key !== rankingGroup).map(o => (
+                                <MenuItem key={o.key} value={o.key} sx={{ fontSize: '0.75rem' }}>Grid by {o.label}</MenuItem>
+                            ))}
+                        </Select>
+                    </FormControl>
+
+                    <ToggleButtonGroup
+                        value={rankingOrder}
+                        exclusive
+                        onChange={(e, v) => v && setRankingOrder(v)}
+                        size="small"
+                        sx={{ height: '32px', bgcolor: 'rgba(255,255,255,0.03)' }}
+                    >
+                        <ToggleButton value="desc" sx={{ fontSize: '0.65rem', px: 1.5, color: 'rgba(255,255,255,0.6)' }}>DESC</ToggleButton>
+                        <ToggleButton value="asc" sx={{ fontSize: '0.65rem', px: 1.5, color: 'rgba(255,255,255,0.6)' }}>ASC</ToggleButton>
+                    </ToggleButtonGroup>
+
+                    <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={clearAllBrushes}
+                        sx={{
+                            fontSize: '0.7rem',
+                            height: '32px',
+                            textTransform: 'none',
+                            borderColor: 'rgba(255,255,255,0.2)',
+                            color: 'rgba(255,255,255,0.7)',
+                            px: 2,
+                            '&:hover': { borderColor: '#7aa2f7', color: '#7aa2f7' }
+                        }}
+                    >
+                        Clear Selection
+                    </Button>
+                </Stack>
+            )}
+
+            {/* Charts Area */}
+            <Box ref={containerRef} sx={{ flex: 1, overflowY: 'auto', pr: 1 }}>
+                {view === 'trend' ? (
+                    <Stack spacing={2}>
+                        {trendMetrics.map((mKey, idx) => {
+                            const opt = KPI_OPTIONS.find(o => o.key === mKey);
+                            const label = mKey === 'turnover' ? 'Daily Turnover' : mKey === 'theo' ? 'Daily Theo' : opt.label;
+                            return (
+                                <Box key={`${mKey}-${idx}`} sx={{
+                                    bgcolor: 'rgba(30,32,48,0.3)', borderRadius: '12px', p: 2, border: '1px solid rgba(255,255,255,0.05)',
+                                    minHeight: '250px', display: 'flex', flexDirection: 'column'
+                                }}>
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                                        <Typography sx={{ color: 'rgba(255,255,255,0.8)', fontWeight: 700, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: 1 }}>
+                                            {label}
+                                        </Typography>
+                                        <FormControl size="small" sx={{ minWidth: 120 }}>
+                                            <Select
+                                                value={mKey}
+                                                onChange={(e) => {
+                                                    const newMetrics = [...trendMetrics];
+                                                    newMetrics[idx] = e.target.value;
+                                                    setTrendMetrics(newMetrics);
+                                                }}
+                                                sx={{
+                                                    fontSize: '0.7rem',
+                                                    height: '24px',
+                                                    color: 'rgba(255,255,255,0.5)',
+                                                    '.MuiOutlinedInput-notchedOutline': { border: 'none' },
+                                                    '&:hover .MuiOutlinedInput-notchedOutline': { border: 'none' },
+                                                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': { border: 'none' },
+                                                    bgcolor: 'rgba(255,255,255,0.03)',
+                                                    borderRadius: '4px'
+                                                }}
+                                            >
+                                                {KPI_OPTIONS.map(o => <MenuItem key={o.key} value={o.key} sx={{ fontSize: '0.7rem' }}>{o.label}</MenuItem>)}
+                                            </Select>
+                                        </FormControl>
+                                    </Box>
+                                    <Box className={`chart-trend-${idx}`} sx={{ flex: 1 }} />
+                                </Box>
+                            );
+                        })}
+                    </Stack>
+                ) : (
+                    <Box sx={{
+                        display: 'grid',
+                        gridTemplateColumns: rankingFacet === 'none' ? '1fr' : { xs: '1fr', lg: '1fr 1fr', xl: '1fr 1fr 1fr' },
+                        gap: 2
+                    }}>
+                        {rankingData.map((facet, idx) => (
+                            <Box key={facet.facetLabel} sx={{
+                                bgcolor: 'rgba(30,32,48,0.3)', borderRadius: '8px', p: 1.5, border: '1px solid rgba(255,255,255,0.03)',
+                                height: '450px', display: 'flex', flexDirection: 'column'
+                            }}>
+                                <Typography sx={{ color: '#7aa2f7', fontWeight: 700, mb: 1, fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: 1 }}>
+                                    {rankingFacet === 'none' ? `${KPI_OPTIONS.find(o => o.key === rankingKPI).label} Ranking` : facet.facetLabel}
+                                </Typography>
+                                <Box className={`chart-ranking-${idx}`} sx={{ flex: 1 }} />
+                            </Box>
+                        ))}
+                        {rankingData.length === 0 && (
+                            <Box sx={{ gridColumn: '1/-1', textAlign: 'center', py: 10, color: 'rgba(255,255,255,0.2)' }}>
+                                <Typography>No data available for ranking</Typography>
+                            </Box>
+                        )}
+                    </Box>
+                )}
+            </Box>
+        </Box>
+    );
+};
+
+export default TrendCharts;
+
