@@ -1,0 +1,24 @@
+if (facet.chartData.length > 30) {
+                    option.dataZoom = [
+                        {
+                            type: 'slider',
+                            yAxisIndex: 0,
+                            right: 5,
+                            width: 12,
+                            startValue: facet.chartData.length - 30,
+                            endValue: facet.chartData.length - 1,
+                            borderColor: 'transparent',
+                            backgroundColor: 'rgba(255,255,255,0.05)',
+                            fillerColor: 'rgba(122, 162, 247, 0.2)',
+                            handleStyle: { color: '#7aa2f7' },
+                            textStyle: { color: 'transparent' }
+                        },
+                        {
+                            type: 'inside',
+                            yAxisIndex: 0,
+                            zoomOnMouseWheel: false,
+                            moveOnMouseWheel: true
+                        }
+                    ];
+                    option.grid.right = 50; // Extra room for the slider
+                }
